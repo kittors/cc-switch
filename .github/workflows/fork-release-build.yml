@@ -25,7 +25,6 @@ concurrency:
 env:
   NODE_VERSION: "20"
   PNPM_VERSION: "10.12.3"
-  TAURI_UNSIGNED_CONFIG: '{"bundle":{"createUpdaterArtifacts":false}}'
 
 jobs:
   build:
@@ -113,6 +112,13 @@ jobs:
           echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
           echo "Using release tag: $release_tag"
 
+      - name: Write unsigned Tauri config
+        shell: bash
+        run: |
+          cat > tauri.unsigned.conf.json <<'JSON'
+          {"bundle":{"createUpdaterArtifacts":false}}
+          JSON
+
       - name: Build Tauri app (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -120,7 +126,7 @@ jobs:
           set -euo pipefail
           pnpm tauri build \
             --target universal-apple-darwin \
-            --config "$TAURI_UNSIGNED_CONFIG" \
+            --config tauri.unsigned.conf.json \
             --ci
 
       - name: Build Tauri app (Windows)
@@ -128,7 +134,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          pnpm tauri build --bundles msi --config $env:TAURI_UNSIGNED_CONFIG --ci
+          pnpm tauri build --bundles msi --config tauri.unsigned.conf.json --ci
 
       - name: Build Tauri app (Linux)
         if: runner.os == 'Linux'
@@ -137,7 +143,7 @@ jobs:
           set -euo pipefail
           pnpm tauri build \
             --bundles appimage,deb,rpm \
-            --config "$TAURI_UNSIGNED_CONFIG" \
+            --config tauri.unsigned.conf.json \
             --ci
 
       - name: Collect macOS assets

@@ -343,7 +343,7 @@ impl ProxyService {
         )
         .map_err(|e| format!("构建 codex 有效配置失败: {e}"))?;
         if let Some(existing_live) = existing_live.as_ref() {
-            Self::preserve_codex_mcp_servers_from_existing_config(
+            Self::preserve_codex_non_provider_config_from_existing_config(
                 &mut effective_settings,
                 existing_live,
             )?;
@@ -2027,7 +2027,7 @@ impl ProxyService {
                 .transpose()?;
 
             if let Some(existing_value) = existing_backup_value.as_ref() {
-                Self::preserve_codex_mcp_servers_from_existing_config(
+                Self::preserve_codex_non_provider_config_from_existing_config(
                     &mut effective_settings,
                     existing_value,
                 )?;
@@ -2171,65 +2171,15 @@ impl ProxyService {
         self.switch_locks.lock_for_app(app_type).await
     }
 
-    fn preserve_codex_mcp_servers_from_existing_config(
+    fn preserve_codex_non_provider_config_from_existing_config(
         target_settings: &mut Value,
         existing_config: &Value,
     ) -> Result<(), String> {
-        let target_obj = target_settings
-            .as_object_mut()
-            .ok_or_else(|| "Codex 备份必须是 JSON 对象".to_string())?;
-
-        let target_config = target_obj
-            .get("config")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let mut target_doc = if target_config.trim().is_empty() {
-            toml_edit::DocumentMut::new()
-        } else {
-            target_config
-                .parse::<toml_edit::DocumentMut>()
-                .map_err(|e| format!("解析新的 Codex config.toml 失败: {e}"))?
-        };
-
-        let existing_config = existing_config
-            .get("config")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if existing_config.trim().is_empty() {
-            target_obj.insert("config".to_string(), json!(target_doc.to_string()));
-            return Ok(());
-        }
-
-        let existing_doc = existing_config
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| format!("解析现有 Codex 备份失败: {e}"))?;
-
-        if let Some(existing_mcp_servers) = existing_doc.get("mcp_servers") {
-            match target_doc.get_mut("mcp_servers") {
-                Some(target_mcp_servers) => {
-                    if let (Some(target_table), Some(existing_table)) = (
-                        target_mcp_servers.as_table_like_mut(),
-                        existing_mcp_servers.as_table_like(),
-                    ) {
-                        for (server_id, server_item) in existing_table.iter() {
-                            if target_table.get(server_id).is_none() {
-                                target_table.insert(server_id, server_item.clone());
-                            }
-                        }
-                    } else {
-                        log::warn!(
-                            "Codex config contains a non-table mcp_servers section; skipping MCP merge"
-                        );
-                    }
-                }
-                None => {
-                    target_doc["mcp_servers"] = existing_mcp_servers.clone();
-                }
-            }
-        }
-
-        target_obj.insert("config".to_string(), json!(target_doc.to_string()));
-        Ok(())
+        crate::codex_config::preserve_codex_non_provider_config_from_settings(
+            target_settings,
+            existing_config,
+        )
+        .map_err(|e| format!("保留 Codex 非供应商配置失败: {e}"))
     }
 
     fn preserve_codex_oauth_auth_in_backup(
@@ -4961,7 +4911,7 @@ base_url = "https://codex.example/v1"
 
     #[tokio::test]
     #[serial]
-    async fn update_live_backup_from_provider_preserves_codex_mcp_servers() {
+    async fn update_live_backup_from_provider_preserves_codex_non_provider_config() {
         let _home = TempHome::new();
         crate::settings::reload_settings().expect("reload settings");
 
@@ -4983,6 +4933,19 @@ base_url = "https://old.example/v1"
 [mcp_servers.echo]
 command = "npx"
 args = ["echo-server"]
+
+[marketplaces.ponytail]
+source = "github"
+url = "https://github.com/DietrichGebert/ponytail"
+
+[plugins."ponytail@ponytail"]
+enabled = true
+
+[hooks.state]
+ponytail = "full"
+
+[projects."/work/repo"]
+trust_level = "trusted"
 "#
             }))
             .expect("serialize seed backup"),
@@ -5023,10 +4986,47 @@ base_url = "https://new.example/v1"
             .get("config")
             .and_then(|v| v.as_str())
             .expect("config string");
+        let parsed: toml::Value = toml::from_str(config).expect("parse merged codex config");
 
         assert!(
             config.contains("[mcp_servers.echo]"),
             "existing Codex MCP section should survive proxy hot-switch backup update"
+        );
+        assert_eq!(
+            parsed
+                .get("marketplaces")
+                .and_then(|v| v.get("ponytail"))
+                .and_then(|v| v.get("url"))
+                .and_then(|v| v.as_str()),
+            Some("https://github.com/DietrichGebert/ponytail"),
+            "existing Codex plugin marketplace should survive proxy hot-switch backup update"
+        );
+        assert_eq!(
+            parsed
+                .get("plugins")
+                .and_then(|v| v.get("ponytail@ponytail"))
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool()),
+            Some(true),
+            "existing Codex plugin registration should survive proxy hot-switch backup update"
+        );
+        assert_eq!(
+            parsed
+                .get("hooks")
+                .and_then(|v| v.get("state"))
+                .and_then(|v| v.get("ponytail"))
+                .and_then(|v| v.as_str()),
+            Some("full"),
+            "existing Codex hook state should survive proxy hot-switch backup update"
+        );
+        assert_eq!(
+            parsed
+                .get("projects")
+                .and_then(|v| v.get("/work/repo"))
+                .and_then(|v| v.get("trust_level"))
+                .and_then(|v| v.as_str()),
+            Some("trusted"),
+            "existing Codex project config should survive proxy hot-switch backup update"
         );
         assert!(
             config.contains("https://new.example/v1"),
